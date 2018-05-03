@@ -72,9 +72,9 @@ struct hts221_dev {
 	u8 poll_interval;
 	bool heater;
     bool enabled;
-	//温度数据
+	//the data of tempurate
 	int data_t;
-	//湿度数据
+	//the data of humitity
 	int data_h;
 	struct hts221_sensor sensors[HTS221_SENSOR_MAX];
 };

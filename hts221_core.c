@@ -17,14 +17,14 @@
 #include "hts221_core.h"
 
 /*************************************************
-  宏定义
+  the driver info
 *************************************************/
-#define DRIVER_VER1		0					//主版本号
-#define DRIVER_VER2		1					//次版本号
-#define DRV_MAJOR		104 				//驱动主设备号
-#define DRV_MINOR	 	1					//次设备个数
+#define DRIVER_VER1		0					//
+#define DRIVER_VER2		1					//
+#define DRV_MAJOR		104 				//
+#define DRV_MINOR	 	1					//
 
-//模块调试开关
+//debug macro
 #undef	DEBUG
 //#define DEBUG
 #ifdef DEBUG
@@ -155,7 +155,7 @@ static struct hts221_resolution hts221_resolution_t[] = {
 	{ 256, HTS221_T_RESOLUTION_256 },
 };
 
-struct hts221_dev *pdev;
+struct hts221_dev *hts221_ptr = NULL;
 
 static int hts221_hw_init(struct hts221_dev *dev)
 {
@@ -845,23 +845,16 @@ static void hts221_input_work_fn(struct work_struct *work)
 }
 
 
-
-/******************************************************************************
-*	函数:	drv_open
-*	功能:	设备打开函数
-*	参数:
-*	返回:	0 - 成功
- ******************************************************************************/
 static int drv_open(struct inode *inode, struct file *filp)
 {
 	int ret = 0;
 
-	if(!atomic_dec_and_test(&pdev->opened)) {
+	if(!atomic_dec_and_test(&hts221_ptr->opened)) {
 		ret = -EBUSY;
 		goto error;
 	}
 	
-	ret = hts221_enable(pdev);
+	ret = hts221_enable(hts221_ptr);
 	if(ret < 0)
 	{
 		goto error;
@@ -870,77 +863,52 @@ static int drv_open(struct inode *inode, struct file *filp)
 	return ret;
 
 error:
-	atomic_inc(&pdev->opened);
+	atomic_inc(&hts221_ptr->opened);
 	return ret;
 }
 
-/******************************************************************************
-*	函数:	drv_release
-*	功能:	设备关闭函数
-*	参数:
-*	返回:	0 - 成功
- ******************************************************************************/
 static int drv_release(struct inode *inode, struct file *filp)
 {
-	hts221_disable(pdev);
+	hts221_disable(hts221_ptr);
 	
-	atomic_inc(&pdev->opened);
+	atomic_inc(&hts221_ptr->opened);
 	return 0;
 }
 
-/******************************************************************************
-*	函数:	drv_write
-*	功能:	设备写入函数
-*	参数:
-*	返回:
- ******************************************************************************/
 static ssize_t drv_write(struct file *filp, const char *buf, size_t count, loff_t *offset)
 {
 	int ret = 0;
 
-error:
-
 	return ret;
 }
 
-/******************************************************************************
-*	函数:	drv_read
-*	功能:	设备读取函数
-*	参数:
-*	返回:	>=0 - 成功读取到的字节数
- ******************************************************************************/
 static ssize_t drv_read(struct file *filp, char *buf, size_t count, loff_t *offset)
 {
 	int ret = 0;
 	
-	mutex_lock(&pdev->lock);
+	mutex_lock(&hts221_ptr->lock);
 	
-	ret = put_user(pdev->data_t, buf);
+	ret = put_user(hts221_ptr->data_t, buf);
 	if(ret)
 	{
 		goto error;
 	}
 	
-	ret = put_user(pdev->data_h, buf);
+	ret = put_user(hts221_ptr->data_h, (buf + 4));
 	if(ret)
 	{
 		goto error;
 	}
-	
-	mutex_unlock(&pdev->lock);
+
+	ret = 8;
+	mutex_unlock(&hts221_ptr->lock);
 	
 error:
 
 	return ret;
 }
 
-/******************************************************************************
-*	函数:	drv_ioctl
-*	功能:	设备控制函数
-*	参数:
-*	返回:	0 - 成功
- ******************************************************************************/
-static int drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int ret = 0;
 	int i = 0;
@@ -951,10 +919,40 @@ static int drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			uint32_t val = 0;
 			
 			val = *(uint32_t *)arg;
-			mutex_lock(&pdev->lock);
-			pdev->poll_interval = (uint32_t)val;
-			hts221_update_odr(pdev, pdev->poll_interval);
-			mutex_unlock(&pdev->lock);
+
+			if(val)
+			{
+				mutex_lock(&hts221_ptr->lock);
+				hts221_ptr->poll_interval = (u8)val;
+				hts221_update_odr(hts221_ptr, hts221_ptr->poll_interval);
+				mutex_unlock(&hts221_ptr->lock);
+			}else{
+				//int ret;
+				u8 data = DISABLE_SENSOR;
+				mutex_lock(&hts221_ptr->lock);
+
+				ret = hts221_ptr->tf->write(hts221_ptr->dev, REG_CNTRL1_ADDR, 1, &data);
+				if (ret < 0) {
+					mutex_unlock(&hts221_ptr->lock);
+					return ret;
+				}
+				msleep(20);
+
+				data = ENABLE_SENSOR;
+#ifdef HTS221_BDU
+				data |= REG_DEF_BDU;
+#endif
+
+				ret = hts221_ptr->tf->write(hts221_ptr->dev, REG_CNTRL1_ADDR, 1, &data);
+				if (ret < 0) {
+					mutex_unlock(&hts221_ptr->lock);
+					return ret;
+				}
+				hts221_ptr->odr = ODR_ONESH;
+
+				mutex_unlock(&hts221_ptr->lock);
+				
+			}
 			break;
 		}
 		case SET_HTS221_T_RES:
@@ -972,14 +970,14 @@ static int drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 				return -1;
 			}
 
-			mutex_lock(&pdev->lock);
-			ret = hts221_update_res(pdev, HTS221_SENSOR_T,
+			mutex_lock(&hts221_ptr->lock);
+			ret = hts221_update_res(hts221_ptr, HTS221_SENSOR_T,
 						hts221_resolution_t[i].value);
 			if (ret < 0) {
-				mutex_unlock(&pdev->lock);
+				mutex_unlock(&hts221_ptr->lock);
 				return ret;
 			}
-			mutex_unlock(&pdev->lock);
+			mutex_unlock(&hts221_ptr->lock);
 			break;
 		}
 		case SET_HTS221_H_RES:
@@ -995,47 +993,14 @@ static int drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			if (i == ARRAY_SIZE(hts221_resolution_h))
 				return -1;
 
-			mutex_lock(&pdev->lock);
-			ret = hts221_update_res(pdev, HTS221_SENSOR_H,
+			mutex_lock(&hts221_ptr->lock);
+			ret = hts221_update_res(hts221_ptr, HTS221_SENSOR_H,
 						hts221_resolution_h[i].value);
 			if (ret < 0) {
-				mutex_unlock(&pdev->lock);
+				mutex_unlock(&hts221_ptr->lock);
 				return ret;
 			}
-			mutex_unlock(&pdev->lock);
-			break;
-		}	
-		case SET_HTS221_ONESHOT:
-		{
-			uint8_t val = 0;
-			
-			val = *(uint8_t *)arg;
-			if (val != 0) {
-				//int ret;
-				u8 data = DISABLE_SENSOR;
-				mutex_lock(&pdev->lock);
-
-				ret = pdev->tf->write(pdev->dev, REG_CNTRL1_ADDR, 1, &data);
-				if (ret < 0) {
-					mutex_unlock(&pdev->lock);
-					return ret;
-				}
-				msleep(20);
-
-				data = ENABLE_SENSOR;
-		#ifdef HTS221_BDU
-				data |= REG_DEF_BDU;
-		#endif
-
-				ret = pdev->tf->write(pdev->dev, REG_CNTRL1_ADDR, 1, &data);
-				if (ret < 0) {
-					mutex_unlock(&pdev->lock);
-					return ret;
-				}
-				pdev->odr = ODR_ONESH;
-
-				mutex_unlock(&pdev->lock);
-			}
+			mutex_unlock(&hts221_ptr->lock);
 			break;
 		}	
 		case SET_HTS221_HEATER:
@@ -1046,32 +1011,30 @@ static int drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			val = *(uint8_t *)arg;
 			data = (!val) ? DISABLE_SENSOR : 0x02;
 
-			mutex_lock(&pdev->lock);
-			ret = pdev->tf->write(pdev->dev, REG_CNTRL2_ADDR, 1, &data);
+			mutex_lock(&hts221_ptr->lock);
+			ret = hts221_ptr->tf->write(hts221_ptr->dev, REG_CNTRL2_ADDR, 1, &data);
 			if (ret < 0) {
-				mutex_unlock(&pdev->lock);
+				mutex_unlock(&hts221_ptr->lock);
 				return ret;
 			}
-			pdev->heater = true;
-			mutex_unlock(&pdev->lock);
+			hts221_ptr->heater = true;
+			mutex_unlock(&hts221_ptr->lock);
 			break;
 		}	
-		case SET_HTS221_START:
+		case SET_HTS221_ENABLE:
 		{
 			uint8_t val = *(uint8_t *)arg;
-			mutex_lock(&pdev->lock);
+			mutex_lock(&hts221_ptr->lock);
 			if (val)
-				hts221_enable(pdev);
+				hts221_enable(hts221_ptr);
 			else
-				hts221_disable(pdev);
-			mutex_unlock(&pdev->lock);
+				hts221_disable(hts221_ptr);
+			mutex_unlock(&hts221_ptr->lock);
 			break;
 		}
 		default:
 			break;
 	}
-	
-error:
 	
 	return ret;
 }
@@ -1089,7 +1052,7 @@ int hts221_probe(struct hts221_dev *dev)
 {
 	int ret = 0;
 	int err;
-	//打印版本信息
+	//
 	printk("%s-V%d.%d\n", dev->name, DRIVER_VER1, DRIVER_VER2);
 	
 	BUILD_BUG_ON(!ARRAY_SIZE(hts221_odr_table));
@@ -1128,19 +1091,19 @@ int hts221_probe(struct hts221_dev *dev)
 		goto power_off;
 	}
 
-	//申请设备号
+	//
 	ret = register_chrdev_region (dev->drv_dev_num, DRV_MINOR, dev->name);
 	if (ret) {
 		goto ERR_CHRDEV;
 	}
-	//注册字符设备
+	//
 	cdev_init(&dev->drv_cdev, &drv_fops);
 	dev->drv_cdev.owner = THIS_MODULE;
 	ret = cdev_add(&dev->drv_cdev, dev->drv_dev_num, DRV_MINOR);
 	if (ret) {
 		goto ERR_CDEV;
 	}
-	//创建设备节点
+	//
 	dev->drv_class = class_create(THIS_MODULE, dev->name);
 	if (dev->drv_class == NULL) {
 		ret = -ENOMEM;
@@ -1177,11 +1140,11 @@ int hts221_probe(struct hts221_dev *dev)
 
 	INIT_DELAYED_WORK(&dev->input_work, hts221_input_work_fn);
 
-	pdev = dev;
+	hts221_ptr = dev;
 	
 	mutex_unlock(&dev->lock);
 
-	//初始化打开计数
+	//
 	atomic_set(&dev->opened, 1);
 	
 	return 0;
@@ -1207,11 +1170,13 @@ void hts221_remove(struct hts221_dev *dev)
 	hts221_device_power_off(dev);
 	//hts221_input_cleanup(dev);
 	//hts221_sysfs_remove(dev->dev);
-	//设备卸载
+	//unregister the chrdev
 	device_destroy(dev->drv_class, dev->drv_dev_num);
 	class_destroy(dev->drv_class);	
 	cdev_del(&dev->drv_cdev);
 	unregister_chrdev_region(dev->drv_dev_num, DRV_MINOR);
+
+	hts221_ptr = NULL;
 	DPRINTK("exit done\n");
 }
 EXPORT_SYMBOL(hts221_remove);
