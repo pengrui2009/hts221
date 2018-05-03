@@ -342,8 +342,8 @@ int hts221_enable(struct hts221_dev *dev)
 	mutex_lock(&dev->lock);
 	if (!dev->enabled) {
 		err = hts221_device_power_on(dev);
-		schedule_delayed_work(&dev->input_work,
-				      msecs_to_jiffies(dev->poll_interval));
+		if(ODR_ONESH != dev->odr)
+			schedule_delayed_work(&dev->input_work, msecs_to_jiffies(dev->poll_interval));
 	}
 	mutex_unlock(&dev->lock);
 
@@ -355,7 +355,8 @@ int hts221_disable(struct hts221_dev *dev)
 {
 	int err = 0;
 
-	cancel_delayed_work_sync(&dev->input_work);
+	if(ODR_ONESH != dev->odr)
+		cancel_delayed_work_sync(&dev->input_work);
 
 	mutex_lock(&dev->lock);
 	if (dev->enabled)
@@ -806,18 +807,6 @@ static int hts221_get_data(struct hts221_dev *dev, int *data_t, int *data_h)
 	return 0;
 }
 
-static void hts221_report_data(struct hts221_dev *dev, int data_t, int data_h,
-			       s64 timestamp)
-{
-	input_event(dev->input_dev, INPUT_EVENT_TYPE, INPUT_EVENT_X, data_t);
-	input_event(dev->input_dev, INPUT_EVENT_TYPE, INPUT_EVENT_Y, data_h);
-	input_event(dev->input_dev, INPUT_EVENT_TYPE, INPUT_EVENT_TIME_MSB,
-		    timestamp >> 32);
-	input_event(dev->input_dev, INPUT_EVENT_TYPE, INPUT_EVENT_TIME_LSB,
-		    timestamp & 0xffffffff);
-	input_sync(dev->input_dev);
-}
-
 static void hts221_input_work_fn(struct work_struct *work)
 {
 	int err, data_t, data_h;
@@ -833,7 +822,7 @@ static void hts221_input_work_fn(struct work_struct *work)
 		dev_err(dev->dev, "get data failed\n");
 	else
 	{
-		hts221_report_data(dev, data_t, data_h, hts221_get_time_ns());
+		//hts221_report_data(dev, data_t, data_h, hts221_get_time_ns());
 		dev->data_t = data_t;
 		dev->data_h = data_h;
 	}	
@@ -885,23 +874,35 @@ static ssize_t drv_write(struct file *filp, const char *buf, size_t count, loff_
 static ssize_t drv_read(struct file *filp, char *buf, size_t count, loff_t *offset)
 {
 	int ret = 0;
+	int data_t = 0;
+	int data_h = 0;
 	
 	mutex_lock(&hts221_ptr->lock);
-	
-	ret = put_user(hts221_ptr->data_t, buf);
-	if(ret)
-	{
-		goto error;
-	}
-	
-	ret = put_user(hts221_ptr->data_h, (buf + 4));
-	if(ret)
-	{
-		goto error;
-	}
 
-	ret = 8;
+	if(ODR_ONESH == hts221_ptr->odr)
+	{
+		ret = hts221_get_data(hts221_ptr, &data_t, &data_h);
+		if (ret < 0)
+			dev_err(hts221_ptr->dev, "get data failed\n");
+	}else{
+		data_t = hts221_ptr->data_t;
+		data_h = hts221_ptr->data_h;
+	}
+	
 	mutex_unlock(&hts221_ptr->lock);
+	
+	ret = put_user(data_t, buf);
+	if(ret)
+	{
+		goto error;
+	}
+	
+	ret = put_user(data_h, (buf + 4));
+	if(ret)
+	{
+		goto error;
+	}
+	ret = 8;
 	
 error:
 
@@ -1024,12 +1025,12 @@ static long drv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		case SET_HTS221_ENABLE:
 		{
 			uint8_t val = *(uint8_t *)arg;
-			mutex_lock(&hts221_ptr->lock);
+			
 			if (val)
 				hts221_enable(hts221_ptr);
 			else
 				hts221_disable(hts221_ptr);
-			mutex_unlock(&hts221_ptr->lock);
+			
 			break;
 		}
 		default:
@@ -1112,19 +1113,6 @@ int hts221_probe(struct hts221_dev *dev)
 	
 	device_create(dev->drv_class, NULL, dev->drv_dev_num, NULL, dev->name);
 
-#if 0
-	err = hts221_input_init(dev, "hts221");
-	if (err < 0) {
-		dev_err(dev->dev, "input init failed: %d\n", err);
-		goto power_off;
-	}
-
-	err = hts221_sysfs_init(dev->dev);
-	if (err < 0) {
-		dev_err(dev->dev, "sysfs register failed\n");
-		goto input_cleanup;
-	}
-#endif
 	err = hts221_device_power_off(dev);
 	if (err < 0) {
 		dev_err(dev->dev, "power off failed: %d\n", err);
@@ -1166,7 +1154,8 @@ EXPORT_SYMBOL(hts221_probe);
 
 void hts221_remove(struct hts221_dev *dev)
 {
-	cancel_delayed_work_sync(&dev->input_work);
+	if(ODR_ONESH != dev->odr)
+		cancel_delayed_work_sync(&dev->input_work);
 	hts221_device_power_off(dev);
 	//hts221_input_cleanup(dev);
 	//hts221_sysfs_remove(dev->dev);
