@@ -152,7 +152,7 @@ MODULE_DEVICE_TABLE(of, hts221_i2c_id_table);
 static struct i2c_driver hts221_i2c_driver = {
 	.driver = {
 		.owner = THIS_MODULE,
-		.name = "hts221_i2c",
+		.name = "hts221",
 #ifdef CONFIG_PM
 		.pm = &hts221_i2c_pm_ops,
 #endif /* CONFIG_PM */

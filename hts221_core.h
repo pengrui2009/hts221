@@ -10,9 +10,10 @@
 
 #ifndef _HTS221_H_
 #define _HTS221_H_
-
+#include <linux/cdev.h>		//char device register
 #include <linux/device.h>
 #include <linux/module.h>
+#include "hts221lib.h"
 
 /* Input events used by lsm303agr driver */
 #define INPUT_EVENT_TYPE		EV_MSC
@@ -52,9 +53,13 @@ struct hts221_sensor {
 
 struct hts221_dev {
 	const char *name;
+	atomic_t opened;
 	u16 bus_type;
 	struct mutex lock;
 	struct device *dev;
+	dev_t drv_dev_num;
+	struct cdev drv_cdev;
+    struct class *drv_class;
 	struct input_dev *input_dev;
 	struct delayed_work input_work;
 	const struct hts221_transfer_function *tf;
@@ -66,7 +71,11 @@ struct hts221_dev {
 	u8 odr;
 	u8 poll_interval;
 	bool heater;
-        bool enabled;
+    bool enabled;
+	//温度数据
+	int data_t;
+	//湿度数据
+	int data_h;
 	struct hts221_sensor sensors[HTS221_SENSOR_MAX];
 };
 
